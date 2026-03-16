@@ -10,6 +10,7 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import Base
+from nanobot.config.paths import get_media_dir
 from pydantic import Field
 
 try:
@@ -163,7 +164,7 @@ class QQChannel(BaseChannel):
             logger.error("Error sending QQ message: {}", e)
 
     async def _download_image(self, url: str, filename: str) -> str | None:
-        """Download an image from URL and save to workspace directory.
+        """Download an image from URL and save to media directory.
         
         Args:
             url: The image URL to download
@@ -178,7 +179,7 @@ class QQChannel(BaseChannel):
             
         try:
             
-            file_path = get_workspace_path() / filename
+            file_path = get_media_dir() / filename
             async with self._http_session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
                 if response.status == 200:
                     content = await response.read()
@@ -216,7 +217,7 @@ class QQChannel(BaseChannel):
                 chat_id = str(getattr(data.author, 'id', None) or getattr(data.author, 'user_openid', 'unknown'))
                 user_id = chat_id
                 self._chat_type_cache[chat_id] = "c2c"
-                # handle image
+        
             if len(data.attachments) > 0:
                 media =  [await self._download_image(att.url, att.filename) for att in data.attachments]
             else:

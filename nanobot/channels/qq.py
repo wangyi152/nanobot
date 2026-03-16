@@ -24,6 +24,7 @@ try:
 
     AIOHTTP_AVAILABLE = True
     QQ_AVAILABLE = True
+
 except ImportError:
     AIOHTTP_AVAILABLE = False
     QQ_AVAILABLE = False
@@ -31,13 +32,6 @@ except ImportError:
     botpy = None
     C2CMessage = None
     GroupMessage = None
-
-try:
-    import aiohttp
-    AIOHTTP_AVAILABLE = True
-except ImportError:
-    AIOHTTP_AVAILABLE = False
-    aiohttp = None
 
 if TYPE_CHECKING:
     from botpy.message import C2CMessage, GroupMessage
@@ -90,12 +84,6 @@ class QQChannel(BaseChannel):
         if not self.config.app_id or not self.config.secret:
             logger.error("QQ app_id and secret not configured")
             return
-        
-        # Initialize HTTP session for downloading images
-        if AIOHTTP_AVAILABLE:
-            self._http_session = aiohttp.ClientSession()
-        else:
-            logger.warning("aiohttp not installed. Image recognition will be disabled. Run: pip install aiohttp")
         
         # Initialize HTTP session for downloading images
         if AIOHTTP_AVAILABLE:
@@ -194,39 +182,6 @@ class QQChannel(BaseChannel):
             logger.error("Error downloading image: {}", e)
             return None
 
-    async def _download_image(self, url: str, filename: str) -> str | None:
-        """Download an image from URL and save to workspace directory.
-        
-        Args:
-            url: The image URL to download
-            filename: The filename to save as
-            
-        Returns:
-            Local file path if successful, None otherwise
-        """
-        if not self._http_session:
-            logger.warning("HTTP session not available for image download")
-            return None
-            
-        try:
-            
-            file_path = get_workspace_path() / filename
-            async with self._http_session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                if response.status == 200:
-                    content = await response.read()
-                    file_path.write_bytes(content)
-                    logger.debug("Downloaded image to {}", file_path)
-                    return str(file_path)
-                else:
-                    logger.warning("Failed to download image: HTTP {}", response.status)
-                    return None
-                
-        except asyncio.TimeoutError:
-            logger.warning("Timeout downloading image from {}", url)
-            return None
-        except Exception as e:
-            logger.error("Error downloading image: {}", e)
-            return None
 
     async def _on_message(self, data: "C2CMessage | GroupMessage", is_group: bool = False) -> None:
         """Handle incoming message from QQ."""
@@ -238,7 +193,6 @@ class QQChannel(BaseChannel):
         
         
             content = (data.content or "").strip()
-            if not content and len(data.attachments) == 0:
             if not content and len(data.attachments) == 0:
                 return
 
@@ -255,17 +209,11 @@ class QQChannel(BaseChannel):
                 media =  [await self._download_image(att.url, att.filename) for att in data.attachments]
             else:
                 media = []
-                # handle image
-            if len(data.attachments) > 0:
-                media =  [await self._download_image(att.url, att.filename) for att in data.attachments]
-            else:
-                media = []
 
             await self._handle_message(
                 sender_id=user_id,
                 chat_id=chat_id,
                 content=content,
-                media=media,
                 media=media,
                 metadata={"message_id": data.id},
             )

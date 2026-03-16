@@ -11,16 +11,23 @@ from nanobot.config.paths import get_workspace_path
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
+from nanobot.config.schema import Base
+from nanobot.config.paths import get_media_dir
+from pydantic import Field
 from nanobot.config.schema import QQConfig
 
 try:
     import botpy
+    import aiohttp
     from botpy.message import C2CMessage, GroupMessage
 
 
+    AIOHTTP_AVAILABLE = True
     QQ_AVAILABLE = True
 except ImportError:
+    AIOHTTP_AVAILABLE = False
     QQ_AVAILABLE = False
+    aiohttp = None
     botpy = None
     C2CMessage = None
     GroupMessage = None
@@ -89,6 +96,12 @@ class QQChannel(BaseChannel):
             self._http_session = aiohttp.ClientSession()
         else:
             logger.warning("aiohttp not installed. Image recognition will be disabled. Run: pip install aiohttp")
+        
+        # Initialize HTTP session for downloading images
+        if AIOHTTP_AVAILABLE:
+            self._http_session = aiohttp.ClientSession()
+        else:
+            logger.warning("aiohttp not installed. Image recognition will be disabled. Run: pip install aiohttp")
 
         self._running = True
         BotClass = _make_bot_class(self)
@@ -148,6 +161,40 @@ class QQChannel(BaseChannel):
             logger.error("Error sending QQ message: {}", e)
 
     async def _download_image(self, url: str, filename: str) -> str | None:
+        """Download an image from URL and save to media directory.
+        
+        Args:
+            url: The image URL to download
+            filename: The filename to save as
+            
+        Returns:
+            Local file path if successful, None otherwise
+        """
+        if not self._http_session:
+            logger.warning("HTTP session not available for image download")
+            return None
+            
+        try:
+            
+            file_path = get_media_dir(self.name) / filename
+            async with self._http_session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                if response.status == 200:
+                    content = await response.read()
+                    file_path.write_bytes(content)
+                    logger.debug("Downloaded image to {}", file_path)
+                    return str(file_path)
+                else:
+                    logger.warning("Failed to download image: HTTP {}", response.status)
+                    return None
+                
+        except asyncio.TimeoutError:
+            logger.warning("Timeout downloading image from {}", url)
+            return None
+        except Exception as e:
+            logger.error("Error downloading image: {}", e)
+            return None
+
+    async def _download_image(self, url: str, filename: str) -> str | None:
         """Download an image from URL and save to workspace directory.
         
         Args:
@@ -189,7 +236,9 @@ class QQChannel(BaseChannel):
                 return
             self._processed_ids.append(data.id)
         
+        
             content = (data.content or "").strip()
+            if not content and len(data.attachments) == 0:
             if not content and len(data.attachments) == 0:
                 return
 
@@ -201,6 +250,11 @@ class QQChannel(BaseChannel):
                 chat_id = str(getattr(data.author, 'id', None) or getattr(data.author, 'user_openid', 'unknown'))
                 user_id = chat_id
                 self._chat_type_cache[chat_id] = "c2c"
+            
+            if len(data.attachments) > 0:
+                media =  [await self._download_image(att.url, att.filename) for att in data.attachments]
+            else:
+                media = []
                 # handle image
             if len(data.attachments) > 0:
                 media =  [await self._download_image(att.url, att.filename) for att in data.attachments]
@@ -211,6 +265,7 @@ class QQChannel(BaseChannel):
                 sender_id=user_id,
                 chat_id=chat_id,
                 content=content,
+                media=media,
                 media=media,
                 metadata={"message_id": data.id},
             )

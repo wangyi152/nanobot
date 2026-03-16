@@ -1,37 +1,32 @@
 """QQ channel implementation using botpy SDK."""
 
 import asyncio
-import aiohttp
 from collections import deque
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger
-from nanobot.config.paths import get_workspace_path 
 
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import Base
-from nanobot.config.paths import get_media_dir
 from pydantic import Field
-from nanobot.config.schema import QQConfig
 
 try:
     import botpy
-    import aiohttp
     from botpy.message import C2CMessage, GroupMessage
-
-
+    import aiohttp
     AIOHTTP_AVAILABLE = True
-    QQ_AVAILABLE = True
 
+    QQ_AVAILABLE = True
 except ImportError:
-    AIOHTTP_AVAILABLE = False
     QQ_AVAILABLE = False
-    aiohttp = None
     botpy = None
     C2CMessage = None
     GroupMessage = None
+    AIOHTTP_AVAILABLE = False
+    aiohttp = None
+
 
 if TYPE_CHECKING:
     from botpy.message import C2CMessage, GroupMessage
@@ -61,19 +56,35 @@ def _make_bot_class(channel: "QQChannel") -> "type[botpy.Client]":
     return _Bot
 
 
+class QQConfig(Base):
+    """QQ channel configuration using botpy SDK."""
+
+    enabled: bool = False
+    app_id: str = ""
+    secret: str = ""
+    allow_from: list[str] = Field(default_factory=list)
+    msg_format: Literal["plain", "markdown"] = "plain"
+
+
 class QQChannel(BaseChannel):
     """QQ channel using botpy SDK with WebSocket connection."""
 
     name = "qq"
+    display_name = "QQ"
 
-    def __init__(self, config: QQConfig, bus: MessageBus):
+    @classmethod
+    def default_config(cls) -> dict[str, Any]:
+        return QQConfig().model_dump(by_alias=True)
+
+    def __init__(self, config: Any, bus: MessageBus):
+        if isinstance(config, dict):
+            config = QQConfig.model_validate(config)
         super().__init__(config, bus)
         self.config: QQConfig = config
         self._client: "botpy.Client | None" = None
         self._processed_ids: deque = deque(maxlen=1000)
         self._msg_seq: int = 1  # 消息序列号，避免被 QQ API 去重
         self._chat_type_cache: dict[str, str] = {}
-        self._http_session: aiohttp.ClientSession | None = None
 
     async def start(self) -> None:
         """Start the QQ bot."""
@@ -84,19 +95,17 @@ class QQChannel(BaseChannel):
         if not self.config.app_id or not self.config.secret:
             logger.error("QQ app_id and secret not configured")
             return
-        
-        # Initialize HTTP session for downloading images
+                # Initialize HTTP session for downloading images
         if AIOHTTP_AVAILABLE:
             self._http_session = aiohttp.ClientSession()
         else:
-            logger.warning("aiohttp not installed. Image recognition will be disabled. Run: pip install aiohttp")
+            logger.error("aiohttp not installed. Image recognition will be disabled. Run: pip install aiohttp")    
 
         self._running = True
         BotClass = _make_bot_class(self)
         self._client = BotClass()
         logger.info("QQ bot started (C2C & Group supported)")
         await self._run_bot()
-
 
     async def _run_bot(self) -> None:
         """Run the bot connection with auto-reconnect."""
@@ -128,28 +137,33 @@ class QQChannel(BaseChannel):
         try:
             msg_id = msg.metadata.get("message_id")
             self._msg_seq += 1
-            msg_type = self._chat_type_cache.get(msg.chat_id, "c2c")
-            if msg_type == "group":
+            use_markdown = self.config.msg_format == "markdown"
+            payload: dict[str, Any] = {
+                "msg_type": 2 if use_markdown else 0,
+                "msg_id": msg_id,
+                "msg_seq": self._msg_seq,
+            }
+            if use_markdown:
+                payload["markdown"] = {"content": msg.content}
+            else:
+                payload["content"] = msg.content
+
+            chat_type = self._chat_type_cache.get(msg.chat_id, "c2c")
+            if chat_type == "group":
                 await self._client.api.post_group_message(
                     group_openid=msg.chat_id,
-                    msg_type=2,
-                    markdown={"content": msg.content},
-                    msg_id=msg_id,
-                    msg_seq=self._msg_seq,
+                    **payload,
                 )
             else:
                 await self._client.api.post_c2c_message(
                     openid=msg.chat_id,
-                    msg_type=2,
-                    markdown={"content": msg.content},
-                    msg_id=msg_id,
-                    msg_seq=self._msg_seq,
+                    **payload,
                 )
         except Exception as e:
             logger.error("Error sending QQ message: {}", e)
 
     async def _download_image(self, url: str, filename: str) -> str | None:
-        """Download an image from URL and save to media directory.
+        """Download an image from URL and save to workspace directory.
         
         Args:
             url: The image URL to download
@@ -164,7 +178,7 @@ class QQChannel(BaseChannel):
             
         try:
             
-            file_path = get_media_dir(self.name) / filename
+            file_path = get_workspace_path() / filename
             async with self._http_session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
                 if response.status == 200:
                     content = await response.read()
@@ -182,7 +196,6 @@ class QQChannel(BaseChannel):
             logger.error("Error downloading image: {}", e)
             return None
 
-
     async def _on_message(self, data: "C2CMessage | GroupMessage", is_group: bool = False) -> None:
         """Handle incoming message from QQ."""
         try:
@@ -190,8 +203,7 @@ class QQChannel(BaseChannel):
             if data.id in self._processed_ids:
                 return
             self._processed_ids.append(data.id)
-        
-        
+
             content = (data.content or "").strip()
             if not content and len(data.attachments) == 0:
                 return
@@ -204,7 +216,7 @@ class QQChannel(BaseChannel):
                 chat_id = str(getattr(data.author, 'id', None) or getattr(data.author, 'user_openid', 'unknown'))
                 user_id = chat_id
                 self._chat_type_cache[chat_id] = "c2c"
-            
+                # handle image
             if len(data.attachments) > 0:
                 media =  [await self._download_image(att.url, att.filename) for att in data.attachments]
             else:

@@ -165,20 +165,20 @@ class QQChannel(BaseChannel):
 
     async def _download_image(self, url: str, filename: str) -> str | None:
         """Download an image from URL and save to media directory.
-        
+
         Args:
             url: The image URL to download
             filename: The filename to save as
-            
+
         Returns:
             Local file path if successful, None otherwise
         """
         if not self._http_session:
             logger.warning("HTTP session not available for image download")
             return None
-            
+
         try:
-            
+
             file_path = get_media_dir() / filename
             async with self._http_session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as response:
                 if response.status == 200:
@@ -217,7 +217,7 @@ class QQChannel(BaseChannel):
                 chat_id = str(getattr(data.author, 'id', None) or getattr(data.author, 'user_openid', 'unknown'))
                 user_id = chat_id
                 self._chat_type_cache[chat_id] = "c2c"
-        
+
             if len(data.attachments) > 0:
                 media =  [await self._download_image(att.url, att.filename) for att in data.attachments]
             else:
